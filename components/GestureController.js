@@ -1,613 +1,256 @@
 import React from "https://esm.sh/react@19";
 import {
-  STATIONS,
-  FISH_TYPES,
-  PLAYER_SPEED,
-  BOSS_SPEED,
-  BOSS_VISION_RADIUS,
-  INTERACTION_RADIUS,
-} from "../constants.js";
-import * as GeminiService from "../services/geminiService.js";
-
-const GameState = {
-  IDLE: "IDLE",
-  FISHING: "FISHING",
-  CAUGHT: "CAUGHT",
-  BOSS_ACTIVE: "BOSS_ACTIVE",
-  PENALTY: "PENALTY",
-};
-
-// Simple Audio Synth with Variance
-const playSound = (type) => {
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) return;
-  const ctx = new AudioContext();
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-
-  const now = ctx.currentTime;
-  const variance = Math.random() * 100 - 50;
-
-  if (type === "catch") {
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(500 + variance, now);
-    osc.frequency.exponentialRampToValueAtTime(1000 + variance, now + 0.1);
-    gain.gain.setValueAtTime(0.3, now);
-    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-    osc.start(now);
-    osc.stop(now + 0.5);
-  } else if (type === "bad") {
-    osc.type = "sawtooth";
-    osc.frequency.setValueAtTime(150 + variance, now);
-    osc.frequency.linearRampToValueAtTime(80, now + 0.3);
-    gain.gain.setValueAtTime(0.3, now);
-    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
-    osc.start(now);
-    osc.stop(now + 0.3);
-  } else if (type === "rare") {
-    osc.type = "triangle";
-    osc.frequency.setValueAtTime(400 + variance, now);
-    osc.frequency.linearRampToValueAtTime(600 + variance, now + 0.1);
-    osc.frequency.linearRampToValueAtTime(1200 + variance, now + 0.3);
-    gain.gain.setValueAtTime(0.2, now);
-    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
-    osc.start(now);
-    osc.stop(now + 0.6);
-  }
-};
+  FilesetResolver,
+  GestureRecognizer,
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-export function GameWorld({ gestureState }) {
-  // ====== 自动缩放（解决“只剩一半”）======
-  const [scale, setScale] = React.useState(1);
+// 判断手指是否伸直：y 越小越“向上伸”
+function isFingerUp(lm, tip, pip) {
+  return lm[tip].y < lm[pip].y - 0.02;
+}
 
-  React.useEffect(() => {
-    const update = () => {
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
+// 只数“四根手指”（index/middle/ring/pinky），不算拇指
+function countUpFingers(lm) {
+  const indexUp = isFingerUp(lm, 8, 6);
+  const middleUp = isFingerUp(lm, 12, 10);
+  const ringUp = isFingerUp(lm, 16, 14);
+  const pinkyUp = isFingerUp(lm, 20, 18);
 
-      const W = 980;
-      const H = 560;
+  let c = 0;
+  if (indexUp) c++;
+  if (middleUp) c++;
+  if (ringUp) c++;
+  if (pinkyUp) c++;
+  return c;
+}
 
-      // 预留：顶部 UI + 右上摄像头
-      const padX = 40;
-      const padY = 190;
+export function GestureController({ onGestureChange }) {
+  const videoRef = React.useRef(null);
 
-      const s = Math.min((vw - padX) / W, (vh - padY) / H, 1);
-      setScale(Math.max(0.35, s));
-    };
+  const [debugStatus, setDebugStatus] = React.useState("Initializing AI...");
+  const [loading, setLoading] = React.useState(true);
 
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
+  const lastVideoTime = React.useRef(-1);
+  const gestureRecognizerRef = React.useRef(null);
+  const lastStatusRef = React.useRef("");
 
-  // ====== refs（主循环）======
-  const gestureStateRef = React.useRef(gestureState);
-  React.useEffect(() => {
-    gestureStateRef.current = gestureState;
-  }, [gestureState]);
+  const streamRef = React.useRef(null);
+  const rafRef = React.useRef(0);
+  const isActiveRef = React.useRef(true);
 
-  const playerRef = React.useRef({ x: 150, y: 300 });
-  const bossRef = React.useRef({ x: -100, y: 100, active: false, cooldown: 300, dir: 1 });
-  const fishingRef = React.useRef({ active: false, progress: 0, stationId: "", lock: false });
-  const riskRef = React.useRef(0);
-
-  // ✅ 键盘：用 e.code（WASD 稳定）
-  const keysRef = React.useRef({});
-
-  // ====== 轨迹（解决“人丢了”）======
-  const trailCanvasRef = React.useRef(null);
-  const trailRef = React.useRef([]);
-
-  // ====== state for UI ======
-  const [score, setScore] = React.useState(0);
-  const [gameState, setGameState] = React.useState(GameState.IDLE);
-  const [caughtItem, setCaughtItem] = React.useState(null);
-  const [bossMessage, setBossMessage] = React.useState("");
-  const [riskDisplay, setRiskDisplay] = React.useState(0);
-
-  // ====== element refs for fast DOM updates ======
-  const playerElRef = React.useRef(null);
-  const bossElRef = React.useRef(null);
-
-  // ====== helpers ======
-  const getNearestStation = React.useCallback((px, py) => {
-    let nearest = null;
-    let minDst = Infinity;
-    for (const s of STATIONS) {
-      const dist = Math.hypot(px - s.x, py - s.y);
-      if (dist < minDst) {
-        minDst = dist;
-        nearest = s;
-      }
+  const updateDebugStatus = React.useCallback((status) => {
+    if (lastStatusRef.current !== status) {
+      lastStatusRef.current = status;
+      setDebugStatus(status);
     }
-    return minDst <= INTERACTION_RADIUS ? nearest : null;
   }, []);
 
-  const spawnBoss = React.useCallback(() => {
-    bossRef.current.active = true;
-    const fromLeft = Math.random() > 0.5;
-    bossRef.current.x = fromLeft ? -50 : 1000;
-    bossRef.current.y = 100 + Math.random() * 300;
-    bossRef.current.dir = fromLeft ? 1 : -1;
-    setGameState(GameState.BOSS_ACTIVE);
-    setBossMessage("");
-  }, []);
-
-  const handleCatch = React.useCallback(async () => {
-    if (fishingRef.current.lock) return;
-    fishingRef.current.lock = true;
-
-    const p = fishingRef.current.progress;
-    let pool = FISH_TYPES.filter((f) => f.type === "normal");
-
-    if (p > 90) {
-      pool = [
-        ...FISH_TYPES.filter((f) => f.type === "rare"),
-        ...FISH_TYPES.filter((f) => f.type === "bad"),
-      ];
-    } else if (p > 50) {
-      pool = [...pool, ...FISH_TYPES.filter((f) => f.type === "rare")];
-    }
-
-    const result = pool[Math.floor(Math.random() * pool.length)];
-
-    playSound(result.type === "rare" ? "rare" : result.type === "bad" ? "bad" : "catch");
-    setGameState(GameState.CAUGHT);
-    setScore((s) => s + result.score);
-
-    const baseItem = { ...result, description: "Caught!", tier: result.type };
-    setCaughtItem(baseItem);
-
-    fishingRef.current = { active: false, progress: 0, stationId: "", lock: false };
-
-    GeminiService.generateCatchDescription(baseItem).then((desc) => {
-      setCaughtItem((prev) => {
-        if (prev && prev.name === result.name) return { ...prev, description: desc };
-        return prev;
-      });
-    });
-  }, []);
-
-  // Auto-close popup when fist released
   React.useEffect(() => {
-    if (!gestureState.isFist && caughtItem) {
-      setCaughtItem(null);
-      setGameState(GameState.IDLE);
-      fishingRef.current.lock = false;
-    }
-  }, [gestureState.isFist, caughtItem]);
+    isActiveRef.current = true;
 
-  // ====== main loop ======
-  React.useEffect(() => {
-    let frameId = 0;
-
-    const loop = () => {
-      const currentGesture = gestureStateRef.current;
-
-      // 1) ✅ movement (Keyboard only: WASD / Arrow Keys)
-      let dx = 0;
-      let dy = 0;
-
-      if (keysRef.current["KeyW"] || keysRef.current["ArrowUp"]) dy -= 1;
-      if (keysRef.current["KeyS"] || keysRef.current["ArrowDown"]) dy += 1;
-      if (keysRef.current["KeyA"] || keysRef.current["ArrowLeft"]) dx -= 1;
-      if (keysRef.current["KeyD"] || keysRef.current["ArrowRight"]) dx += 1;
-
-      // normalize diagonal
-      if (dx !== 0 || dy !== 0) {
-        const len = Math.hypot(dx, dy);
-        dx /= len;
-        dy /= len;
-      }
-
-      if (
-        gameState !== GameState.PENALTY &&
-        gameState !== GameState.CAUGHT &&
-        !fishingRef.current.active
-      ) {
-        playerRef.current.x += dx * PLAYER_SPEED;
-        playerRef.current.y += dy * PLAYER_SPEED;
-
-        playerRef.current.x = clamp(playerRef.current.x, 100, 880);
-        playerRef.current.y = clamp(playerRef.current.y, 120, 480);
-
-        // 轨迹记录
-        const moved = Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001;
-        if (moved) {
-          trailRef.current.push({
-            x: playerRef.current.x,
-            y: playerRef.current.y,
-            t: performance.now(),
-          });
-          if (trailRef.current.length > 140) trailRef.current.shift();
-        } else {
-          if (trailRef.current.length > 0 && Math.random() < 0.25) trailRef.current.shift();
-        }
-      }
-
-      // 2) boss logic
-      if (bossRef.current.active) {
-        bossRef.current.x += bossRef.current.dir * BOSS_SPEED;
-
-        const distToPlayer = Math.hypot(
-          playerRef.current.x - bossRef.current.x,
-          playerRef.current.y - bossRef.current.y
+    const setupMediaPipe = async () => {
+      try {
+        updateDebugStatus("Loading Model...");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
         );
+        if (!isActiveRef.current) return;
 
-        if (distToPlayer < BOSS_VISION_RADIUS && fishingRef.current.active) {
-          setGameState(GameState.PENALTY);
-          fishingRef.current.active = false;
-          setScore((s) => Math.max(0, s - 20));
-          playSound("bad");
-          GeminiService.generateBossLecture().then((text) => setBossMessage(text));
+        gestureRecognizerRef.current = await GestureRecognizer.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+            delegate: "CPU",
+          },
+          runningMode: "VIDEO",
+          numHands: 1,
+        });
 
-          setTimeout(() => {
-            setGameState(GameState.IDLE);
-            bossRef.current.active = false;
-            setBossMessage("");
-          }, 3000);
-        }
-
-        if (bossRef.current.x < -100 || bossRef.current.x > 1100) {
-          bossRef.current.active = false;
-          bossRef.current.cooldown = 400 + Math.random() * 300;
-          setGameState(GameState.IDLE);
-        }
-      } else {
-        if (gameState !== GameState.PENALTY) {
-          bossRef.current.cooldown--;
-          if (bossRef.current.cooldown <= 0 && Math.random() < 0.005 + riskRef.current * 0.0005) {
-            spawnBoss();
-          }
-        }
+        setLoading(false);
+        updateDebugStatus("AI Ready");
+      } catch (err) {
+        console.error("MediaPipe load error:", err);
+        setLoading(false);
+        updateDebugStatus("AI Error");
       }
-
-      // 3) gesture interaction (只保留：摸鱼/抓鱼)
-      const nearest = getNearestStation(playerRef.current.x, playerRef.current.y);
-
-      if (nearest && gameState !== GameState.PENALTY && gameState !== GameState.CAUGHT) {
-        // 🖐️ Open Palm -> Start/Continue Fishing
-        if (currentGesture?.isWaving) {
-          if (!fishingRef.current.active) {
-            fishingRef.current.active = true;
-            fishingRef.current.stationId = nearest.id;
-            setGameState(GameState.FISHING);
-          }
-          fishingRef.current.progress = Math.min(100, fishingRef.current.progress + 0.6);
-          riskRef.current = Math.min(100, riskRef.current + 0.2);
-        }
-        // ✊ Fist -> Catch
-        else if (currentGesture?.isFist) {
-          handleCatch();
-        }
-        // No gesture -> decay
-        else if (fishingRef.current.active) {
-          fishingRef.current.progress -= 2;
-          if (fishingRef.current.progress <= 0) {
-            fishingRef.current.active = false;
-            setGameState(GameState.IDLE);
-          }
-        }
-      } else if (fishingRef.current.active) {
-        fishingRef.current.active = false;
-        fishingRef.current.progress = 0;
-        setGameState(GameState.IDLE);
-      }
-
-      if (!fishingRef.current.active && riskRef.current > 0) {
-        riskRef.current = Math.max(0, riskRef.current - 0.1);
-      }
-      setRiskDisplay(riskRef.current);
-
-      // 4) update DOM
-      if (playerElRef.current) {
-        playerElRef.current.style.transform = `translate(${playerRef.current.x}px, ${playerRef.current.y}px)`;
-        if (dx !== 0 || dy !== 0) playerElRef.current.classList.add("animate-bounce");
-        else playerElRef.current.classList.remove("animate-bounce");
-      }
-      if (bossElRef.current) {
-        bossElRef.current.style.display = bossRef.current.active ? "flex" : "none";
-        bossElRef.current.style.transform = `translate(${bossRef.current.x}px, ${bossRef.current.y}px)`;
-      }
-
-      // 轨迹绘制
-      const c = trailCanvasRef.current;
-      if (c) {
-        const ctx = c.getContext("2d");
-        if (ctx) {
-          ctx.clearRect(0, 0, c.width, c.height);
-          const pts = trailRef.current;
-
-          if (pts.length >= 2) {
-            ctx.lineWidth = 6;
-            ctx.lineJoin = "round";
-            ctx.lineCap = "round";
-            ctx.strokeStyle = "rgba(0, 53, 128, 0.33)";
-            ctx.beginPath();
-            ctx.moveTo(pts[0].x, pts[0].y);
-            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-            ctx.stroke();
-
-            const last = pts[pts.length - 1];
-            ctx.fillStyle = "rgba(254, 187, 2, 0.95)";
-            ctx.beginPath();
-            ctx.arc(last.x, last.y, 7, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-      }
-
-      frameId = requestAnimationFrame(loop);
     };
 
-    frameId = requestAnimationFrame(loop);
+    const startCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 320, height: 240, frameRate: { ideal: 30 }, facingMode: "user" },
+          audio: false,
+        });
+        streamRef.current = stream;
 
-    // ✅ 用 e.code：KeyW/KeyA/KeyS/KeyD
-    const onKd = (e) => (keysRef.current[e.code] = true);
-    const onKu = (e) => (keysRef.current[e.code] = false);
+        const video = videoRef.current;
+        if (!video) return;
+        video.srcObject = stream;
+        video.onloadedmetadata = () => video.play().catch(() => {});
+      } catch (error) {
+        console.error("Camera permission denied:", error);
+        updateDebugStatus("Camera Denied");
+      }
+    };
 
-    window.addEventListener("keydown", onKd);
-    window.addEventListener("keyup", onKu);
+    setupMediaPipe();
+    startCamera();
+
+    const predictWebcam = () => {
+      if (!isActiveRef.current) return;
+
+      const recognizer = gestureRecognizerRef.current;
+      const video = videoRef.current;
+
+      if (recognizer && video && !video.paused && video.currentTime !== lastVideoTime.current) {
+        lastVideoTime.current = video.currentTime;
+
+        try {
+          const results = recognizer.recognizeForVideo(video, Date.now());
+
+          let isFist = false;
+          let isWaving = false;   // Open Palm -> Fishing
+          let isPointing = false; // 我们复用这个字段：表示“在移动”
+          let handPresent = false;
+
+          // ✅ 离散方向移动：只输出 -1/0/1
+          let move = { x: 0, y: 0 };
+
+          let currentStatus = "No Hand";
+
+          // 有手
+          if (results?.landmarks?.length > 0 && results.landmarks[0]?.length) {
+            handPresent = true;
+
+            // 先看识别到的手势名（Closed_Fist / Open_Palm / 其它）
+            let gestureName = "";
+            if (results?.gestures?.length > 0 && results.gestures[0]?.length > 0) {
+              gestureName = results.gestures[0][0].categoryName || "";
+            }
+
+            // 1) ✊ 抓鱼：优先级最高
+            if (gestureName === "Closed_Fist") {
+              isFist = true;
+              currentStatus = "✊ GRAB (CATCH)";
+            }
+            // 2) 🖐️ 摸鱼：Open_Palm
+            else if (gestureName === "Open_Palm") {
+              isWaving = true;
+              currentStatus = "🖐️ FISHING";
+            }
+            // 3) 其它情况：用“数手指”来做方向键
+            else {
+              const lm = results.landmarks[0];
+              const n = countUpFingers(lm);
+
+              // ✅ 速度特别慢：让 GameWorld 的 dx/dy 变成很小的值
+              // 你 GameWorld 里是 dx * PLAYER_SPEED，所以这里直接给 0.25 当“慢速步伐”
+              const step = 0.25;
+
+              if (n === 1) {
+                isPointing = true;
+                move.x = -step; move.y = 0;
+                currentStatus = "👆(1) LEFT";
+              } else if (n === 2) {
+                isPointing = true;
+                move.x = step; move.y = 0;
+                currentStatus = "✌️(2) RIGHT";
+              } else if (n === 3) {
+                isPointing = true;
+                move.x = 0; move.y = -step;
+                currentStatus = "🤟(3) UP";
+              } else if (n === 4) {
+                isPointing = true;
+                move.x = 0; move.y = step;
+                currentStatus = "🖖(4) DOWN";
+              } else {
+                currentStatus = "✋ Hand Detected";
+              }
+            }
+          }
+
+          updateDebugStatus(currentStatus);
+          onGestureChange?.({ isFist, isWaving, isPointing, handPresent, move });
+        } catch (e) {
+          // 静默吞掉偶发错误
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(predictWebcam);
+    };
+
+    rafRef.current = requestAnimationFrame(predictWebcam);
 
     return () => {
-      cancelAnimationFrame(frameId);
-      window.removeEventListener("keydown", onKd);
-      window.removeEventListener("keyup", onKu);
+      isActiveRef.current = false;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+      if (streamRef.current) {
+        for (const t of streamRef.current.getTracks()) t.stop();
+        streamRef.current = null;
+      }
+      if (videoRef.current) videoRef.current.srcObject = null;
     };
-  }, [gameState, getNearestStation, handleCatch, spawnBoss]);
+  }, [onGestureChange, updateDebugStatus]);
 
-  // ====== UI (no JSX) ======
-  const rootCls =
-    "relative w-[980px] h-[560px] bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-300 mx-auto select-none font-sans";
-  const hiddenCursor = { cursor: "none" };
+  const hudClass =
+    debugStatus.includes("LEFT") || debugStatus.includes("RIGHT") || debugStatus.includes("UP") || debugStatus.includes("DOWN")
+      ? "bg-blue-500 text-white"
+      : debugStatus.includes("FISHING")
+      ? "bg-green-500 text-white"
+      : debugStatus.includes("CATCH")
+      ? "bg-red-500 text-white"
+      : "bg-black/50 text-gray-300";
 
-  const styleTag = React.createElement("style", null, `
-    @keyframes waddle {
-      0% { transform: rotate(-5deg) translateY(0px); }
-      25% { transform: rotate(0deg) translateY(-4px); }
-      50% { transform: rotate(5deg) translateY(0px); }
-      75% { transform: rotate(0deg) translateY(-4px); }
-      100% { transform: rotate(-5deg) translateY(0px); }
-    }
-    .animate-waddle { animation: waddle 0.6s infinite linear; }
-  `);
-
-  const background = React.createElement(
-    "div",
-    { className: "absolute inset-0 z-0 bg-slate-50" },
-    React.createElement("div", {
-      className: "absolute inset-0",
-      style: {
-        backgroundImage:
-          "linear-gradient(#f8fafc 1px, transparent 1px), linear-gradient(90deg, #f8fafc 1px, transparent 1px)",
-        backgroundSize: "40px 40px",
-        backgroundColor: "#f1f5f9",
-      },
-    }),
-    React.createElement("div", { className: "absolute top-0 left-0 w-full h-32 bg-[#003580] shadow-md z-0" }),
-    React.createElement("div", { className: "absolute top-8 right-8 w-64 h-24 bg-blue-100/30 border border-white/50 backdrop-blur-sm rounded-lg z-0" }),
-    React.createElement("div", { className: "absolute bottom-8 left-8 text-6xl opacity-80 z-10" }, "🪴"),
-    React.createElement("div", { className: "absolute top-40 right-40 text-6xl opacity-80 z-10" }, "🌵")
-  );
-
-  const trailCanvas = React.createElement("canvas", {
-    ref: trailCanvasRef,
-    width: 980,
-    height: 560,
-    className: "absolute inset-0 z-10 pointer-events-none",
-  });
-
-  const stations = STATIONS.map((station) => {
-    const activeHere = fishingRef.current.stationId === station.id && fishingRef.current.active;
-
-    return React.createElement(
-      "div",
-      {
-        key: station.id,
-        className:
-          "absolute w-40 h-28 flex flex-col items-center justify-end transition-transform duration-200 z-20 " +
-          (activeHere ? "scale-105" : ""),
-        style: { left: station.x, top: station.y, transform: "translate(-50%, -50%)" },
-      },
-      React.createElement("div", { className: "absolute bottom-0 w-full h-16 bg-white rounded-lg shadow-md border-t border-slate-200" }),
-      React.createElement(
-        "div",
-        { className: "absolute bottom-10 w-20 h-12 bg-gray-800 rounded-t-md shadow-sm flex items-center justify-center" },
-        React.createElement("div", { className: "w-4 h-4 rounded-full bg-slate-700" })
-      ),
-      React.createElement(
-        "div",
-        { className: "absolute -top-6 w-20 h-20 rounded-full bg-white border-4 border-white shadow-md overflow-hidden z-20" },
-        React.createElement("img", {
-          src: `https://api.dicebear.com/9.x/big-ears/svg?seed=${station.avatarSeed}`,
-          className: "w-full h-full",
-          alt: "avatar",
-        })
-      ),
-      React.createElement(
-        "span",
-        { className: "absolute -bottom-3 bg-[#003580] text-white px-2 py-0.5 rounded shadow text-[10px] font-bold" },
-        station.name
-      ),
-      activeHere
-        ? React.createElement(
-            "div",
-            { className: "absolute -top-16 w-full flex flex-col items-center z-50" },
-            React.createElement(
-              "div",
-              { className: "bg-[#003580] text-white font-bold px-3 py-1 rounded-full text-xs shadow-lg mb-1 whitespace-nowrap animate-bounce" },
-              "🎣 FISHING..."
-            ),
-            React.createElement(
-              "div",
-              { className: "w-32 h-4 bg-gray-200 rounded-full mt-1 overflow-hidden border border-white shadow-md" },
-              React.createElement("div", {
-                className:
-                  "h-full transition-all duration-100 " +
-                  (fishingRef.current.progress > 90 ? "bg-red-500" : "bg-blue-400"),
-                style: { width: `${fishingRef.current.progress}%` },
-              })
-            )
-          )
-        : null
-    );
-  });
-
-  // 玩家：脚下定位圈 + 仍显示手势图标（摸鱼/抓鱼）
-  const player = React.createElement(
-    "div",
-    {
-      ref: playerElRef,
-      className: "absolute w-16 h-20 z-30 flex flex-col items-center transition-none",
-      style: { left: -100, top: -100 },
-    },
-
-    React.createElement("div", {
-      className:
-        "absolute left-1/2 top-[58px] -translate-x-1/2 w-20 h-8 rounded-full bg-[#febb02]/35 blur-[1px] border border-[#febb02]/30",
-    }),
-
-    React.createElement(
-      "div",
-      { className: "w-16 h-16 bg-white rounded-full border-4 border-[#003580] shadow-xl overflow-hidden relative" },
-      React.createElement("img", {
-        src: "https://api.dicebear.com/9.x/big-ears/svg?seed=Player1",
-        className: "w-full h-full scale-110 translate-y-1",
-        alt: "player",
-      })
-    ),
-
-    gestureState.isWaving
-      ? React.createElement(
-          "div",
-          { className: "absolute -right-8 -top-8 bg-white p-2 rounded-full shadow-lg border border-gray-100 animate-pulse" },
-          React.createElement("span", { className: "text-2xl" }, "🖐️")
-        )
-      : null,
-
-    gestureState.isFist
-      ? React.createElement(
-          "div",
-          { className: "absolute -right-8 -top-8 bg-blue-100 p-2 rounded-full shadow-lg border border-blue-300 scale-110" },
-          React.createElement("span", { className: "text-2xl" }, "✊")
-        )
-      : null
-  );
-
-  // Boss：只用 seed，避免参数导致头像加载失败
-  const boss = React.createElement(
-    "div",
-    {
-      ref: bossElRef,
-      className:
-        "absolute z-50 flex flex-col items-center justify-center pointer-events-none transition-transform duration-100",
-      style: { display: "none", left: -100, width: "100px", height: "100px" },
-    },
-    React.createElement("div", { className: "absolute w-[200px] h-[200px] rounded-full border-4 border-red-500/50 bg-red-500/10 -z-10 animate-pulse" }),
-    React.createElement(
-      "div",
-      { className: "w-24 h-24 bg-red-50 rounded-full border-4 border-red-600 shadow-2xl overflow-hidden animate-waddle z-50 relative" },
-      React.createElement("img", {
-        src: "https://api.dicebear.com/9.x/big-ears/svg?seed=BossMan",
-        className: "w-full h-full object-cover",
-        alt: "boss",
-      })
-    ),
-    bossMessage
-      ? React.createElement(
-          "div",
-          { className: "absolute -top-24 left-1/2 transform -translate-x-1/2 bg-white border-4 border-red-600 text-red-600 font-black px-4 py-3 rounded-2xl shadow-xl whitespace-nowrap z-[60] animate-bounce text-lg min-w-[200px] text-center" },
-          bossMessage
-        )
-      : null
-  );
-
-  const catchPopup =
-    caughtItem &&
-    React.createElement(
-      "div",
-      { className: "absolute inset-0 flex items-center justify-center z-[100] bg-black/50 backdrop-blur-sm animate-in fade-in zoom-in duration-200" },
-      React.createElement(
-        "div",
-        { className: "bg-white p-8 rounded-3xl shadow-2xl max-w-md text-center transform hover:scale-105 transition-transform border-t-8 border-[#003580] relative overflow-hidden" },
-        React.createElement("div", { className: "text-9xl mb-6 animate-bounce drop-shadow-xl" }, caughtItem.emoji),
-        React.createElement("h2", { className: "text-4xl font-black text-slate-800 mb-2 tracking-tight" }, caughtItem.name),
-        React.createElement(
-          "div",
-          { className: "bg-slate-50 p-4 rounded-xl mb-6 text-slate-600 italic border border-slate-100 font-serif text-lg min-h-[5rem] flex items-center justify-center" },
-          caughtItem.description
-        ),
-        React.createElement("div", { className: "text-sm text-slate-400 mb-4 font-bold uppercase tracking-widest" }, "Release Fist to Close"),
-        React.createElement(
-          "div",
-          {
-            className:
-              "inline-block px-8 py-3 rounded-full text-white font-black text-2xl shadow-lg " +
-              (caughtItem.score > 0
-                ? "bg-gradient-to-r from-green-400 to-green-600"
-                : "bg-gradient-to-r from-red-500 to-red-700"),
-          },
-          `${caughtItem.score > 0 ? "+" : ""}${caughtItem.score} PTS`
-        )
-      )
-    );
-
-  const hud = React.createElement(
-    "div",
-    { className: "absolute top-4 left-4 flex gap-4 z-50" },
-    React.createElement(
-      "div",
-      { className: "bg-white/95 backdrop-blur px-5 py-3 rounded-2xl shadow-xl border border-slate-200 font-black text-slate-700 text-xl flex flex-col items-center leading-none" },
-      React.createElement("span", { className: "text-xs text-slate-400 font-bold uppercase tracking-wider mb-1" }, "Score"),
-      React.createElement("span", { className: score >= 0 ? "text-[#003580]" : "text-red-600" }, String(score))
-    ),
-    React.createElement(
-      "div",
-      { className: "bg-white/95 backdrop-blur px-5 py-3 rounded-2xl shadow-xl border border-slate-200 font-bold text-slate-700 flex flex-col justify-center gap-1 w-48" },
-      React.createElement("span", { className: "text-xs text-slate-400 font-bold uppercase tracking-wider" }, "Detection Risk"),
-      React.createElement(
-        "div",
-        { className: "w-full h-4 bg-slate-100 rounded-full overflow-hidden border border-slate-200 relative" },
-        React.createElement("div", {
-          className: "h-full transition-all duration-300 " + (riskDisplay > 80 ? "bg-red-500" : "bg-[#febb02]"),
-          style: { width: `${riskDisplay}%` },
-        })
-      )
-    )
-  );
-
-  const penalty =
-    gameState === GameState.PENALTY &&
-    React.createElement(
-      "div",
-      { className: "absolute inset-0 bg-red-600/80 flex flex-col items-center justify-center z-[100] backdrop-blur-md" },
-      React.createElement("div", { className: "text-9xl mb-4" }, "👮‍♂️"),
-      React.createElement("h1", { className: "text-8xl font-black text-white drop-shadow-2xl transform -rotate-3 animate-pulse" }, "BUSTED!"),
-      React.createElement("p", { className: "text-white text-2xl font-bold mt-4 bg-red-800/50 px-6 py-2 rounded-full" }, "-20 Points")
-    );
-
+  // ✅ fixed：永远右上角
   return React.createElement(
     "div",
-    { className: "relative", style: { transform: `scale(${scale})`, transformOrigin: "top center" } },
+    {
+      className:
+        "fixed top-4 right-4 w-52 h-40 bg-slate-900 rounded-lg border-4 border-slate-700 shadow-xl overflow-hidden z-[999]",
+    },
+
+    React.createElement("video", {
+      ref: videoRef,
+      autoPlay: true,
+      playsInline: true,
+      muted: true,
+      className: "w-full h-full object-cover transform scale-x-[-1] opacity-60",
+    }),
+
     React.createElement(
       "div",
-      { className: rootCls, style: hiddenCursor },
-      background,
-      trailCanvas,
-      styleTag,
-      ...stations,
-      player,
-      boss,
-      catchPopup,
-      hud,
-      penalty
+      { className: "absolute inset-0 flex flex-col justify-end p-2 pointer-events-none" },
+
+      React.createElement(
+        "div",
+        { className: "flex justify-center mb-2" },
+        React.createElement(
+          "div",
+          { className: `text-[10px] font-bold px-2 py-0.5 rounded shadow ${hudClass}` },
+          loading ? "Loading..." : debugStatus
+        )
+      ),
+
+      React.createElement(
+        "div",
+        { className: "grid grid-cols-4 gap-1 text-[8px] text-white/80 text-center font-mono" },
+        React.createElement("div", { className: "bg-slate-800/80 p-1 rounded border border-white/10" }, "1指\nLEFT"),
+        React.createElement("div", { className: "bg-slate-800/80 p-1 rounded border border-white/10" }, "2指\nRIGHT"),
+        React.createElement("div", { className: "bg-slate-800/80 p-1 rounded border border-white/10" }, "3指\nUP"),
+        React.createElement("div", { className: "bg-slate-800/80 p-1 rounded border border-white/10" }, "4指\nDOWN")
+      ),
+
+      React.createElement(
+        "div",
+        { className: "grid grid-cols-2 gap-1 mt-1 text-[8px] text-white/80 text-center font-mono" },
+        React.createElement("div", { className: "bg-slate-800/80 p-1 rounded border border-white/10" }, "🖐️ PALM\nFISH"),
+        React.createElement("div", { className: "bg-slate-800/80 p-1 rounded border border-white/10" }, "✊ FIST\nCATCH")
+      )
     )
   );
 }
