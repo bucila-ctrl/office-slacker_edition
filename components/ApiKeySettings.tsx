@@ -35,8 +35,9 @@ export const ApiKeySettings: React.FC = () => {
       {/* Settings Button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="fixed top-4 left-4 z-50 bg-white/90 hover:bg-white px-3 py-2 rounded-lg shadow-lg border border-slate-200 text-xs font-bold text-slate-600 transition-all"
+        className="fixed top-4 right-4 z-[60] bg-white/90 hover:bg-white px-3 py-2 rounded-lg shadow-lg border border-slate-200 text-xs font-bold text-slate-600 transition-all"
         title="API Key Settings"
+        style={{ marginRight: '220px' }}
       >
         {hasApiKey ? '🔑 API Key Set' : '⚙️ Set API Key'}
       </button>
