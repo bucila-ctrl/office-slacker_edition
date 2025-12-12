@@ -1,272 +1,269 @@
 import React from "https://esm.sh/react@19";
-
-// ✅ MediaPipe Tasks Vision (HandLandmarker)
-// 说明：CodePen 官方示例用的是不带 +esm 的 jsdelivr import，这里用 +esm 更适合“纯 HTML ES Module”场景。
 import {
-  HandLandmarker,
   FilesetResolver,
+  GestureRecognizer,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
 
+// 小工具
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-// 根据关键点判断四指是否伸直（index/middle/ring/pinky）
-// landmark 坐标是归一化 0..1，y 越小越靠上
-function fingerExtended(landmarks, tip, pip) {
-  const TIP = landmarks[tip];
-  const PIP = landmarks[pip];
-  // 给一点阈值，减少抖动
-  return TIP.y < PIP.y - 0.02;
-}
-
-function classifyGesture(landmarks) {
-  // MediaPipe Hands landmarks index:
-  // index tip 8, pip 6
-  // middle tip 12, pip 10
-  // ring tip 16, pip 14
-  // pinky tip 20, pip 18
-  const indexUp = fingerExtended(landmarks, 8, 6);
-  const middleUp = fingerExtended(landmarks, 12, 10);
-  const ringUp = fingerExtended(landmarks, 16, 14);
-  const pinkyUp = fingerExtended(landmarks, 20, 18);
-
-  const openPalm = indexUp && middleUp && ringUp && pinkyUp;
-  const fist = !indexUp && !middleUp && !ringUp && !pinkyUp;
-  const pointing = indexUp && !middleUp && !ringUp && !pinkyUp;
-
-  return { openPalm, fist, pointing };
-}
-
 export function GestureController({ onGestureChange }) {
   const videoRef = React.useRef(null);
-  const canvasRef = React.useRef(null);
 
-  const landmarkerRef = React.useRef(null);
-  const rafRef = React.useRef(0);
+  const [permissionGranted, setPermissionGranted] = React.useState(false);
+  const [loading, setLoading] = React.useState(true);
+  const [debugStatus, setDebugStatus] = React.useState("Initializing AI...");
+
+  const lastVideoTimeRef = React.useRef(-1);
+  const gestureRecognizerRef = React.useRef(null);
+  const lastStatusRef = React.useRef("");
+
   const streamRef = React.useRef(null);
+  const rafRef = React.useRef(0);
+  const isActiveRef = React.useRef(true);
 
-  const [status, setStatus] = React.useState("idle"); // idle | loading | running | error
-  const [err, setErr] = React.useState("");
-
-  // 平滑 move 输出
-  const smoothMoveRef = React.useRef({ x: 0, y: 0 });
-
-  const stop = React.useCallback(() => {
-    cancelAnimationFrame(rafRef.current);
-    rafRef.current = 0;
-
-    if (streamRef.current) {
-      for (const t of streamRef.current.getTracks()) t.stop();
-      streamRef.current = null;
+  const updateDebugStatus = React.useCallback((status) => {
+    if (lastStatusRef.current !== status) {
+      lastStatusRef.current = status;
+      setDebugStatus(status);
     }
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-
-    setStatus("idle");
   }, []);
 
-  const start = React.useCallback(async () => {
-    try {
-      setErr("");
-      setStatus("loading");
+  React.useEffect(() => {
+    isActiveRef.current = true;
 
-      // 1) 摄像头
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" },
-        audio: false,
-      });
-      streamRef.current = stream;
+    const setupMediaPipe = async () => {
+      try {
+        updateDebugStatus("Loading Model...");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
 
+        if (!isActiveRef.current) return;
+
+        gestureRecognizerRef.current = await GestureRecognizer.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+            delegate: "CPU",
+          },
+          runningMode: "VIDEO",
+          numHands: 1,
+        });
+
+        setLoading(false);
+        updateDebugStatus("AI Ready");
+      } catch (err) {
+        console.error("MediaPipe load error:", err);
+        updateDebugStatus("AI Error");
+        setLoading(false);
+      }
+    };
+
+    const startCamera = async () => {
+      try {
+        if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+          updateDebugStatus("No Camera API");
+          return;
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: 320,
+            height: 240,
+            frameRate: { ideal: 30 },
+            facingMode: "user",
+          },
+          audio: false,
+        });
+
+        streamRef.current = stream;
+
+        const video = videoRef.current;
+        if (!video) return;
+
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+          video.play().catch(() => {});
+          setPermissionGranted(true);
+        };
+      } catch (error) {
+        console.error("Camera permission denied:", error);
+        updateDebugStatus("Camera Denied");
+      }
+    };
+
+    setupMediaPipe();
+    startCamera();
+
+    const predictWebcam = () => {
+      if (!isActiveRef.current) return;
+
+      const recognizer = gestureRecognizerRef.current;
       const video = videoRef.current;
-      if (!video) throw new Error("Video element not found");
-      video.srcObject = stream;
 
-      await new Promise((resolve) => {
-        video.onloadeddata = resolve;
-      });
+      if (
+        recognizer &&
+        video &&
+        !video.paused &&
+        video.currentTime !== lastVideoTimeRef.current
+      ) {
+        lastVideoTimeRef.current = video.currentTime;
 
-      // 2) 加载 HandLandmarker
-      // wasm 资源路径 + 模型 task 文件路径（官方示例同款结构）:contentReference[oaicite:1]{index=1}
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-      );
+        try {
+          const results = recognizer.recognizeForVideo(video, Date.now());
 
-      landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-          delegate: "GPU",
-        },
-        runningMode: "VIDEO",
-        numHands: 1,
-      });
+          let isFist = false;
+          let isWaving = false;   // Open Palm
+          let isPointing = false; // Moving
+          let handPresent = false;
+          let move = { x: 0, y: 0 };
+          let currentStatus = "No Hand";
 
-      setStatus("running");
+          if (results?.gestures?.length > 0 && results.gestures[0]?.length > 0) {
+            handPresent = true;
+            const gestureName = results.gestures[0][0].categoryName;
 
-      // 3) 逐帧检测
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
+            // 1) CATCH: Closed Fist
+            if (gestureName === "Closed_Fist") {
+              isFist = true;
+              currentStatus = "✊ GRAB (CATCH)";
+            }
+            // 2) FISH: Open Palm / Victory
+            else if (gestureName === "Open_Palm" || gestureName === "Victory") {
+              isWaving = true;
+              currentStatus = "🖐️ FISHING";
+            }
+            // 3) MOVE: Pointing Up + index tip control
+            else if (gestureName === "Pointing_Up") {
+              isPointing = true;
+              currentStatus = "☝️ MOVING";
 
-      let lastVideoTime = -1;
+              if (results.landmarks && results.landmarks[0] && results.landmarks[0][8]) {
+                const tip = results.landmarks[0][8]; // index finger tip
 
-      const loop = () => {
-        const v = videoRef.current;
-        const landmarker = landmarkerRef.current;
+                // 你原来的逻辑：x 镜像 + 灵敏度 2.0 + deadzone 0.1 + clamp
+                const rawX = tip.x;
+                const rawY = tip.y;
 
-        if (!v || !landmarker) return;
+                move.x = (0.5 - rawX) * 2.0;
+                move.y = (rawY - 0.5) * 2.0;
 
-        // 同步 canvas 尺寸
-        if (canvas && (canvas.width !== v.videoWidth || canvas.height !== v.videoHeight)) {
-          canvas.width = v.videoWidth;
-          canvas.height = v.videoHeight;
-        }
+                if (Math.abs(move.x) < 0.1) move.x = 0;
+                if (Math.abs(move.y) < 0.1) move.y = 0;
 
-        const now = performance.now();
-
-        // 防止重复帧
-        if (v.currentTime !== lastVideoTime) {
-          lastVideoTime = v.currentTime;
-
-          const res = landmarker.detectForVideo(v, now);
-
-          // 画面（可选：你不想显示可注释掉）
-          if (ctx && canvas) {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            // 镜像显示更符合自拍习惯
-            ctx.save();
-            ctx.scale(-1, 1);
-            ctx.drawImage(v, -canvas.width, 0, canvas.width, canvas.height);
-            ctx.restore();
+                move.x = clamp(move.x, -1, 1);
+                move.y = clamp(move.y, -1, 1);
+              }
+            } else {
+              currentStatus = "✋ Hand Detected";
+            }
           }
 
-          if (res?.landmarks?.length) {
-            const landmarks = res.landmarks[0];
+          updateDebugStatus(currentStatus);
 
-            const { openPalm, fist, pointing } = classifyGesture(landmarks);
-
-            // move：用食指指尖 (8) 的位置映射到 -1..1
-            const tip = landmarks[8];
-            // 镜像：因为我们画面镜像了，所以 x 也镜像一下
-            const rawX = (1 - tip.x - 0.5) * 2; // -1..1
-            const rawY = (tip.y - 0.5) * 2;     // -1..1（上负下正）
-
-            const sm = smoothMoveRef.current;
-            sm.x = lerp(sm.x, clamp(rawX, -1, 1), 0.25);
-            sm.y = lerp(sm.y, clamp(rawY, -1, 1), 0.25);
-
-            onGestureChange?.({
-              isWaving: !!openPalm,     // 🖐️ Palm
-              isFist: !!fist,           // ✊ Fist
-              isPointing: !!pointing,   // ☝️ Point
-              handPresent: true,
-              move: { x: sm.x, y: sm.y },
-            });
-          } else {
-            onGestureChange?.({
-              isWaving: false,
-              isFist: false,
-              isPointing: false,
-              handPresent: false,
-              move: { x: 0, y: 0 },
-            });
-          }
+          onGestureChange?.({
+            isFist,
+            isWaving,
+            isPointing,
+            handPresent,
+            move,
+          });
+        } catch (e) {
+          // 这里保持你原来做法：静默吞掉偶发推理异常
         }
+      }
 
-        rafRef.current = requestAnimationFrame(loop);
-      };
+      rafRef.current = requestAnimationFrame(predictWebcam);
+    };
 
-      rafRef.current = requestAnimationFrame(loop);
-    } catch (e) {
-      console.error(e);
-      setErr(e?.message ? String(e.message) : String(e));
-      setStatus("error");
-      stop();
-    }
-  }, [onGestureChange, stop]);
+    // 只要二者都 ready，开始推理
+    // 注意：permissionGranted/loading 是 state，会触发 effect 重新跑，所以这里我们只在 effect 内启动一次循环，
+    // 循环内部会检查 recognizer/video 是否 ready。
+    rafRef.current = requestAnimationFrame(predictWebcam);
 
-  // 组件卸载时关闭摄像头
-  React.useEffect(() => stop, [stop]);
+    return () => {
+      isActiveRef.current = false;
 
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+      if (streamRef.current) {
+        for (const t of streamRef.current.getTracks()) t.stop();
+        streamRef.current = null;
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    };
+  }, [onGestureChange, updateDebugStatus]);
+
+  // HUD 颜色逻辑（完全按你原来的 includes 判断）
+  const hudClass =
+    debugStatus.includes("MOVING")
+      ? "bg-blue-500 text-white"
+      : debugStatus.includes("FISHING")
+      ? "bg-green-500 text-white"
+      : debugStatus.includes("CATCH")
+      ? "bg-red-500 text-white"
+      : "bg-black/50 text-gray-300";
+
+  // UI：右上角小窗 + 叠加HUD
   return React.createElement(
     "div",
-    { className: "w-full max-w-lg px-4" },
+    { className: "absolute top-4 right-4 w-52 h-40 bg-slate-900 rounded-lg border-4 border-slate-700 shadow-xl overflow-hidden z-50" },
+
+    React.createElement("video", {
+      ref: videoRef,
+      autoPlay: true,
+      playsInline: true,
+      muted: true,
+      className: "w-full h-full object-cover transform scale-x-[-1] opacity-60",
+    }),
+
     React.createElement(
       "div",
-      { className: "bg-white rounded-2xl shadow border border-slate-200 p-4 mb-4" },
+      { className: "absolute inset-0 flex flex-col justify-end p-2 pointer-events-none" },
 
       React.createElement(
         "div",
-        { className: "flex items-center justify-between gap-3" },
+        { className: "flex justify-center mb-2" },
         React.createElement(
           "div",
-          null,
-          React.createElement("div", { className: "text-sm font-bold text-slate-800" }, "Webcam Gesture"),
-          React.createElement(
-            "div",
-            { className: "text-xs text-slate-500 mt-1" },
-            status === "idle" && "Ready",
-            status === "loading" && "Loading model…",
-            status === "running" && "Running",
-            status === "error" && "Error"
-          )
+          { className: `text-[10px] font-bold px-2 py-0.5 rounded shadow ${hudClass}` },
+          loading ? "Loading..." : debugStatus
+        )
+      ),
+
+      React.createElement(
+        "div",
+        { className: "grid grid-cols-3 gap-1 text-[8px] text-white/80 text-center font-mono" },
+
+        React.createElement(
+          "div",
+          { className: "bg-slate-800/80 p-1 rounded border border-white/10" },
+          "☝️ POINT",
+          React.createElement("br"),
+          "TO MOVE"
         ),
 
         React.createElement(
           "div",
-          { className: "flex gap-2" },
-          React.createElement(
-            "button",
-            {
-              className:
-                "px-3 py-2 rounded-xl bg-slate-900 text-white text-sm disabled:opacity-40",
-              onClick: start,
-              disabled: status === "loading" || status === "running",
-            },
-            "启用摄像头"
-          ),
-          React.createElement(
-            "button",
-            {
-              className:
-                "px-3 py-2 rounded-xl border border-slate-300 text-slate-700 text-sm disabled:opacity-40",
-              onClick: stop,
-              disabled: status !== "running" && status !== "loading",
-            },
-            "关闭"
-          )
+          { className: "bg-slate-800/80 p-1 rounded border border-white/10" },
+          "🖐️ PALM",
+          React.createElement("br"),
+          "TO FISH"
+        ),
+
+        React.createElement(
+          "div",
+          { className: "bg-slate-800/80 p-1 rounded border border-white/10" },
+          "✊ FIST",
+          React.createElement("br"),
+          "TO CATCH"
         )
-      ),
-
-      err
-        ? React.createElement(
-            "div",
-            { className: "mt-3 text-xs text-red-600 whitespace-pre-wrap" },
-            err
-          )
-        : null,
-
-      // 预览画面（镜像）
-      React.createElement(
-        "div",
-        { className: "mt-3 rounded-xl overflow-hidden bg-slate-100 border border-slate-200" },
-        React.createElement("video", {
-          ref: videoRef,
-          className: "hidden", // 我们用 canvas 显示镜像画面；想直接显示视频可改成 block
-          autoPlay: true,
-          playsInline: true,
-          muted: true,
-        }),
-        React.createElement("canvas", {
-          ref: canvasRef,
-          className: "w-full h-auto",
-        })
       )
     )
   );
