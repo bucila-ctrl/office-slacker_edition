@@ -520,7 +520,7 @@ export function GameWorld({ gestureState }) {
       "div",
       { className: "w-24 h-24 bg-red-50 rounded-full border-4 border-red-600 shadow-2xl overflow-hidden animate-waddle z-50 relative" },
       React.createElement("img", {
-        src: src: "https://api.dicebear.com/9.x/bottts/svg?seed=BossMan",
+        src: "https://api.dicebear.com/9.x/bottts/svg?seed=BossMan",
         className: "w-full h-full object-cover",
         alt: "boss",
       })
