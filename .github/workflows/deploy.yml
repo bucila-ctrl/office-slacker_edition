@@ -38,6 +38,7 @@ jobs:
         run: npm run build
         env:
           NODE_ENV: production
+          VITE_BASE_PATH: /office-slacker_edition/
       
       - name: Setup Pages
         uses: actions/configure-pages@v4

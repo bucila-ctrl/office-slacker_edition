@@ -7,7 +7,8 @@ export default defineConfig(({ mode }) => {
     // For GitHub Pages, set base to your repository name
     // Change this if your repository name is different
     // For local dev, use '/', for GitHub Pages use '/your-repo-name/'
-    const base = process.env.VITE_BASE_PATH || (mode === 'production' ? '/office-slacker_edition/' : '/');
+    const isProduction = mode === 'production' || process.env.NODE_ENV === 'production';
+    const base = process.env.VITE_BASE_PATH || (isProduction ? '/office-slacker_edition/' : '/');
     return {
       base: base,
       server: {
