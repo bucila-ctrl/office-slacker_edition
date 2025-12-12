@@ -1,0 +1,7 @@
+{
+  "name": "Office Slacker: AI Edition",
+  "description": "Gesture-controlled office fishing game. Wave to slack off, make a fist to catch items. Features AI-generated rewards.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
