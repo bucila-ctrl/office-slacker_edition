@@ -146,4 +146,4 @@ This project is open source and available for personal use.
 
 - Powered by Google Gemini API
 - Hand tracking by MediaPipe
-- UI inspired by Booking.com design
+
