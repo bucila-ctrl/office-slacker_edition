@@ -63,7 +63,31 @@ function clamp(v, min, max) {
 }
 
 export function GameWorld({ gestureState }) {
-  // --- refs to avoid re-render thrash inside RAF loop ---
+  // ====== 自动缩放（解决“只剩一半”）======
+  const [scale, setScale] = React.useState(1);
+
+  React.useEffect(() => {
+    const update = () => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      const W = 980;
+      const H = 560;
+
+      // 预留：顶部 UI + 右上摄像头
+      const padX = 40;
+      const padY = 190;
+
+      const s = Math.min((vw - padX) / W, (vh - padY) / H, 1);
+      setScale(Math.max(0.35, s));
+    };
+
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  // ====== refs（主循环）======
   const gestureStateRef = React.useRef(gestureState);
   React.useEffect(() => {
     gestureStateRef.current = gestureState;
@@ -75,18 +99,22 @@ export function GameWorld({ gestureState }) {
   const riskRef = React.useRef(0);
   const keysRef = React.useRef({});
 
-  // --- state for UI ---
+  // ====== 轨迹（解决“人丢了”）======
+  const trailCanvasRef = React.useRef(null);
+  const trailRef = React.useRef([]);
+
+  // ====== state for UI ======
   const [score, setScore] = React.useState(0);
   const [gameState, setGameState] = React.useState(GameState.IDLE);
   const [caughtItem, setCaughtItem] = React.useState(null);
   const [bossMessage, setBossMessage] = React.useState("");
   const [riskDisplay, setRiskDisplay] = React.useState(0);
 
-  // --- element refs for fast DOM updates ---
+  // ====== element refs for fast DOM updates ======
   const playerElRef = React.useRef(null);
   const bossElRef = React.useRef(null);
 
-  // --- helpers ---
+  // ====== helpers ======
   const getNearestStation = React.useCallback((px, py) => {
     let nearest = null;
     let minDst = Infinity;
@@ -114,6 +142,7 @@ export function GameWorld({ gestureState }) {
     if (fishingRef.current.lock) return;
     fishingRef.current.lock = true;
 
+    // 你原逻辑：progress 决定池子
     const p = fishingRef.current.progress;
     let pool = FISH_TYPES.filter((f) => f.type === "normal");
 
@@ -126,6 +155,7 @@ export function GameWorld({ gestureState }) {
       pool = [...pool, ...FISH_TYPES.filter((f) => f.type === "rare")];
     }
 
+    // 若你有 weight 需求，可后面改成加权；先保持简单
     const result = pool[Math.floor(Math.random() * pool.length)];
 
     playSound(result.type === "rare" ? "rare" : result.type === "bad" ? "bad" : "catch");
@@ -154,7 +184,7 @@ export function GameWorld({ gestureState }) {
     }
   }, [gestureState.isFist, caughtItem]);
 
-  // --- main loop ---
+  // ====== main loop ======
   React.useEffect(() => {
     let frameId = 0;
 
@@ -191,6 +221,19 @@ export function GameWorld({ gestureState }) {
 
         playerRef.current.x = clamp(playerRef.current.x, 100, 880);
         playerRef.current.y = clamp(playerRef.current.y, 120, 480);
+
+        // ====== 轨迹记录（只要有移动）======
+        const moved = Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001;
+        if (moved) {
+          trailRef.current.push({
+            x: playerRef.current.x,
+            y: playerRef.current.y,
+            t: performance.now(),
+          });
+          if (trailRef.current.length > 140) trailRef.current.shift();
+        } else {
+          if (trailRef.current.length > 0 && Math.random() < 0.25) trailRef.current.shift();
+        }
       }
 
       // 2) boss logic
@@ -230,7 +273,7 @@ export function GameWorld({ gestureState }) {
         }
       }
 
-      // 3) gesture interaction
+      // 3) gesture interaction (station)
       const nearest = getNearestStation(playerRef.current.x, playerRef.current.y);
 
       if (nearest && gameState !== GameState.PENALTY && gameState !== GameState.CAUGHT) {
@@ -273,6 +316,33 @@ export function GameWorld({ gestureState }) {
         bossElRef.current.style.transform = `translate(${bossRef.current.x}px, ${bossRef.current.y}px)`;
       }
 
+      // ====== 轨迹绘制 ======
+      const c = trailCanvasRef.current;
+      if (c) {
+        const ctx = c.getContext("2d");
+        if (ctx) {
+          ctx.clearRect(0, 0, c.width, c.height);
+          const pts = trailRef.current;
+
+          if (pts.length >= 2) {
+            ctx.lineWidth = 6;
+            ctx.lineJoin = "round";
+            ctx.lineCap = "round";
+            ctx.strokeStyle = "rgba(0, 53, 128, 0.33)";
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+            ctx.stroke();
+
+            const last = pts[pts.length - 1];
+            ctx.fillStyle = "rgba(254, 187, 2, 0.95)";
+            ctx.beginPath();
+            ctx.arc(last.x, last.y, 7, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+
       frameId = requestAnimationFrame(loop);
     };
 
@@ -290,9 +360,9 @@ export function GameWorld({ gestureState }) {
     };
   }, [gameState, getNearestStation, handleCatch, spawnBoss]);
 
-  // --------- UI (no JSX) ----------
+  // ====== UI (no JSX) ======
   const rootCls =
-    "relative w-[980px] h-[560px] bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-300 mx-auto mt-8 select-none font-sans";
+    "relative w-[980px] h-[560px] bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-300 mx-auto select-none font-sans";
   const hiddenCursor = { cursor: "none" };
 
   const styleTag = React.createElement("style", null, `
@@ -323,6 +393,13 @@ export function GameWorld({ gestureState }) {
     React.createElement("div", { className: "absolute bottom-8 left-8 text-6xl opacity-80 z-10" }, "🪴"),
     React.createElement("div", { className: "absolute top-40 right-40 text-6xl opacity-80 z-10" }, "🌵")
   );
+
+  const trailCanvas = React.createElement("canvas", {
+    ref: trailCanvasRef,
+    width: 980,
+    height: 560,
+    className: "absolute inset-0 z-10 pointer-events-none",
+  });
 
   const stations = STATIONS.map((station) => {
     const activeHere = fishingRef.current.stationId === station.id && fishingRef.current.active;
@@ -380,6 +457,7 @@ export function GameWorld({ gestureState }) {
     );
   });
 
+  // ✅ 玩家：加“脚下定位圈”
   const player = React.createElement(
     "div",
     {
@@ -387,6 +465,13 @@ export function GameWorld({ gestureState }) {
       className: "absolute w-16 h-20 z-30 flex flex-col items-center transition-none",
       style: { left: -100, top: -100 },
     },
+
+    // 脚下定位圈（非常关键：永远能看见人在哪）
+    React.createElement("div", {
+      className:
+        "absolute left-1/2 top-[58px] -translate-x-1/2 w-20 h-8 rounded-full bg-[#febb02]/35 blur-[1px] border border-[#febb02]/30",
+    }),
+
     React.createElement(
       "div",
       { className: "w-16 h-16 bg-white rounded-full border-4 border-[#003580] shadow-xl overflow-hidden relative" },
@@ -396,6 +481,7 @@ export function GameWorld({ gestureState }) {
         alt: "player",
       })
     ),
+
     gestureState.isWaving
       ? React.createElement(
           "div",
@@ -403,6 +489,7 @@ export function GameWorld({ gestureState }) {
           React.createElement("span", { className: "text-2xl" }, "🖐️")
         )
       : null,
+
     gestureState.isFist
       ? React.createElement(
           "div",
@@ -410,11 +497,12 @@ export function GameWorld({ gestureState }) {
           React.createElement("span", { className: "text-2xl" }, "✊")
         )
       : null,
+
     gestureState.isPointing
       ? React.createElement(
           "div",
           { className: "absolute -left-8 -top-8 bg-green-100 p-2 rounded-full shadow-lg border border-green-300" },
-          React.createElement("span", { className: "text-2xl" }, "☝️")
+          React.createElement("span", { className: "text-2xl" }, "✌️")
         )
       : null
   );
@@ -510,16 +598,22 @@ export function GameWorld({ gestureState }) {
       React.createElement("p", { className: "text-white text-2xl font-bold mt-4 bg-red-800/50 px-6 py-2 rounded-full" }, "-20 Points")
     );
 
+  // ✅ 外层 scale 包裹：保证完整显示
   return React.createElement(
     "div",
-    { className: rootCls, style: hiddenCursor },
-    background,
-    styleTag,
-    ...stations,
-    player,
-    boss,
-    catchPopup,
-    hud,
-    penalty
+    { className: "relative", style: { transform: `scale(${scale})`, transformOrigin: "top center" } },
+    React.createElement(
+      "div",
+      { className: rootCls, style: hiddenCursor },
+      background,
+      trailCanvas,
+      styleTag,
+      ...stations,
+      player,
+      boss,
+      catchPopup,
+      hud,
+      penalty
+    )
   );
 }
