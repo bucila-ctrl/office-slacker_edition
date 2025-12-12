@@ -4,11 +4,9 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
-    // For GitHub Pages, set base to your repository name
-    // Change this if your repository name is different
-    // For local dev, use '/', for GitHub Pages use '/your-repo-name/'
-    const isProduction = mode === 'production' || process.env.NODE_ENV === 'production';
-    const base = process.env.VITE_BASE_PATH || (isProduction ? '/office-slacker_edition/' : '/');
+    // For GitHub Pages: base must be /office-slacker_edition/
+    // This ensures all assets load correctly from the subdirectory
+    const base = '/office-slacker_edition/';
     return {
       base: base,
       server: {
