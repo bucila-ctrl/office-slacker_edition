@@ -4,24 +4,26 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Office Slacker: AI Edition</title>
-
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap");
       body {
         font-family: "Inter", sans-serif;
-        background: #f0f4f8;
+        background-color: #f0f4f8;
         overflow: hidden;
       }
-      @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
-      .animate-float { animation: float 3s ease-in-out infinite; }
     </style>
+  </head>
 
-    <!-- 直接用 ESM CDN 引 React / ReactDOM -->
+  <body>
+    <div id="root"></div>
+
     <script type="module">
+      // ✅ 纯 HTML 方式：用 CDN 导入 React / ReactDOM
       import React from "https://esm.sh/react@19";
       import ReactDOM from "https://esm.sh/react-dom@19/client";
 
+      // ✅ 你的 App（这里先放一个最小可用版本，确保不再白屏）
       function App() {
         return React.createElement(
           "div",
@@ -30,25 +32,39 @@
             "div",
             { className: "bg-white/80 backdrop-blur rounded-2xl shadow-xl p-8 max-w-xl w-full" },
             React.createElement("h1", { className: "text-3xl font-extrabold mb-2" }, "Office Slacker: AI Edition"),
-            React.createElement("p", { className: "text-slate-600 mb-6" }, "纯 HTML 版本已加载成功 ✅（无需构建）"),
+            React.createElement("p", { className: "text-slate-600 mb-6" }, "纯 HTML 入口已渲染成功 ✅（无需构建）"),
             React.createElement(
               "button",
               {
-                className:
-                  "px-4 py-2 rounded-xl bg-slate-900 text-white hover:opacity-90 active:opacity-80 transition",
+                className: "px-4 py-2 rounded-xl bg-slate-900 text-white hover:opacity-90 active:opacity-80 transition",
                 onClick: () => alert("摸鱼 +1 🐟"),
               },
-              "按我摸鱼"
+              "点击摸鱼"
             )
           )
         );
       }
 
-      ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
-    </script>
-  </head>
+      // ✅ 保留你原来的 root 检查 + try/catch 错误兜底
+      const rootElement = document.getElementById("root");
+      if (!rootElement) {
+        console.error("Failed to find the root element");
+        throw new Error("Failed to find the root element");
+      }
 
-  <body>
-    <div id="root"></div>
+      try {
+        const root = ReactDOM.createRoot(rootElement);
+        root.render(React.createElement(App));
+      } catch (error) {
+        console.error("Error rendering app:", error);
+        rootElement.innerHTML = `
+          <div style="padding: 20px; text-align: center; font-family: Arial, sans-serif;">
+            <h1>Error loading game</h1>
+            <p>Please check the browser console for details.</p>
+            <pre>${error instanceof Error ? error.message : String(error)}</pre>
+          </div>
+        `;
+      }
+    </script>
   </body>
 </html>
