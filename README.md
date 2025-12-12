@@ -1,6 +1,6 @@
 <p align="center">
   <img
-    src="assets/banner.png"
+    src="imggithub.png"
     width="1200"
     height="475"
     alt="Office Fish Hunter Banner"
