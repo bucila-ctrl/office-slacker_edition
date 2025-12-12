@@ -5,7 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Office Fish Hunter</title>
     <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+      html, body { height: 100%; }
+      body { overflow: hidden; } /* 关键：不要让页面滚动，摄像头不会被“滚走” */
+
+      /* 可选：如果你的游戏有固定宽高（980x560），让它居中并且在小屏缩放 */
+      #root { height: 100%; }
+    </style>
   </head>
+
   <body class="bg-slate-100">
     <div id="root"></div>
 
