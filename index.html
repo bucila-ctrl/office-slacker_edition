@@ -1,36 +1,54 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Office Slacker: AI Edition</title>
+
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+      @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap");
       body {
-        font-family: 'Inter', sans-serif;
-        background-color: #f0f4f8;
-        overflow: hidden; /* Prevent scrolling during game */
+        font-family: "Inter", sans-serif;
+        background: #f0f4f8;
+        overflow: hidden;
       }
-      /* Custom Animations */
-      @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+      @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
       .animate-float { animation: float 3s ease-in-out infinite; }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "@google/genai": "https://esm.sh/@google/genai@^1.33.0",
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "react": "https://esm.sh/react@^19.2.3",
-    "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
-  }
-}
-</script>
-<link rel="stylesheet" href="./index.css">
-</head>
+
+    <!-- 直接用 ESM CDN 引 React / ReactDOM -->
+    <script type="module">
+      import React from "https://esm.sh/react@19";
+      import ReactDOM from "https://esm.sh/react-dom@19/client";
+
+      function App() {
+        return React.createElement(
+          "div",
+          { className: "min-h-screen flex items-center justify-center p-6" },
+          React.createElement(
+            "div",
+            { className: "bg-white/80 backdrop-blur rounded-2xl shadow-xl p-8 max-w-xl w-full" },
+            React.createElement("h1", { className: "text-3xl font-extrabold mb-2" }, "Office Slacker: AI Edition"),
+            React.createElement("p", { className: "text-slate-600 mb-6" }, "纯 HTML 版本已加载成功 ✅（无需构建）"),
+            React.createElement(
+              "button",
+              {
+                className:
+                  "px-4 py-2 rounded-xl bg-slate-900 text-white hover:opacity-90 active:opacity-80 transition",
+                onClick: () => alert("摸鱼 +1 🐟"),
+              },
+              "按我摸鱼"
+            )
+          )
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+    </script>
+  </head>
+
   <body>
     <div id="root"></div>
-  <script type="module" src="/index.tsx"></script>
-</body>
+  </body>
 </html>
