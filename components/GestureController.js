@@ -4,25 +4,30 @@ import {
   GestureRecognizer,
 } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
 
-// 小工具
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
 
 export function GestureController({ onGestureChange }) {
   const videoRef = React.useRef(null);
 
-  const [permissionGranted, setPermissionGranted] = React.useState(false);
-  const [loading, setLoading] = React.useState(true);
   const [debugStatus, setDebugStatus] = React.useState("Initializing AI...");
+  const [loading, setLoading] = React.useState(true);
 
-  const lastVideoTimeRef = React.useRef(-1);
+  const lastVideoTime = React.useRef(-1);
   const gestureRecognizerRef = React.useRef(null);
   const lastStatusRef = React.useRef("");
 
   const streamRef = React.useRef(null);
   const rafRef = React.useRef(0);
   const isActiveRef = React.useRef(true);
+
+  // 用于平滑移动（避免抖动）
+  const smoothMoveRef = React.useRef({ x: 0, y: 0 });
 
   const updateDebugStatus = React.useCallback((status) => {
     if (lastStatusRef.current !== status) {
@@ -40,7 +45,6 @@ export function GestureController({ onGestureChange }) {
         const vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
         );
-
         if (!isActiveRef.current) return;
 
         gestureRecognizerRef.current = await GestureRecognizer.createFromOptions(vision, {
@@ -57,8 +61,8 @@ export function GestureController({ onGestureChange }) {
         updateDebugStatus("AI Ready");
       } catch (err) {
         console.error("MediaPipe load error:", err);
-        updateDebugStatus("AI Error");
         setLoading(false);
+        updateDebugStatus("AI Error");
       }
     };
 
@@ -87,7 +91,6 @@ export function GestureController({ onGestureChange }) {
         video.srcObject = stream;
         video.onloadedmetadata = () => {
           video.play().catch(() => {});
-          setPermissionGranted(true);
         };
       } catch (error) {
         console.error("Camera permission denied:", error);
@@ -104,20 +107,15 @@ export function GestureController({ onGestureChange }) {
       const recognizer = gestureRecognizerRef.current;
       const video = videoRef.current;
 
-      if (
-        recognizer &&
-        video &&
-        !video.paused &&
-        video.currentTime !== lastVideoTimeRef.current
-      ) {
-        lastVideoTimeRef.current = video.currentTime;
+      if (recognizer && video && !video.paused && video.currentTime !== lastVideoTime.current) {
+        lastVideoTime.current = video.currentTime;
 
         try {
           const results = recognizer.recognizeForVideo(video, Date.now());
 
           let isFist = false;
           let isWaving = false;   // Open Palm
-          let isPointing = false; // Moving
+          let isPointing = false; // 我们复用这个字段：现在表示“移动模式”
           let handPresent = false;
           let move = { x: 0, y: 0 };
           let currentStatus = "No Hand";
@@ -126,81 +124,95 @@ export function GestureController({ onGestureChange }) {
             handPresent = true;
             const gestureName = results.gestures[0][0].categoryName;
 
-            // 1) CATCH: Closed Fist
+            // 1) ✊ CATCH
             if (gestureName === "Closed_Fist") {
               isFist = true;
               currentStatus = "✊ GRAB (CATCH)";
+
+              // 握拳时把平滑残留清掉，避免松开后漂移
+              smoothMoveRef.current.x = 0;
+              smoothMoveRef.current.y = 0;
             }
-            // 2) FISH: Open Palm / Victory
-            else if (gestureName === "Open_Palm" || gestureName === "Victory") {
+            // 2) 🖐️ FISH
+            else if (gestureName === "Open_Palm") {
               isWaving = true;
               currentStatus = "🖐️ FISHING";
+
+              smoothMoveRef.current.x = 0;
+              smoothMoveRef.current.y = 0;
             }
-            // 3) MOVE: Pointing Up + index tip control
-            else if (gestureName === "Pointing_Up") {
+            // 3) ✌️ MOVE（两指）
+            else if (gestureName === "Victory") {
               isPointing = true;
-              currentStatus = "☝️ MOVING";
+              currentStatus = "✌️ MOVING (SLOW)";
 
-              if (results.landmarks && results.landmarks[0] && results.landmarks[0][8]) {
-                const tip = results.landmarks[0][8]; // index finger tip
+              if (results.landmarks && results.landmarks[0]) {
+                const lm = results.landmarks[0];
 
-                // 你原来的逻辑：x 镜像 + 灵敏度 2.0 + deadzone 0.1 + clamp
-                const rawX = tip.x;
-                const rawY = tip.y;
+                // ✅ 用手掌中心（wrist(0) + middle_mcp(9)）更稳
+                const wrist = lm[0];
+                const midMcp = lm[9];
+                const cx = (wrist.x + midMcp.x) / 2;
+                const cy = (wrist.y + midMcp.y) / 2;
 
-                move.x = (0.5 - rawX) * 2.0;
-                move.y = (rawY - 0.5) * 2.0;
+                // 归一化到 -1..1（x 镜像让视觉更自然）
+                const rawX = (0.5 - cx) * 2.0;
+                const rawY = (cy - 0.5) * 2.0;
 
-                if (Math.abs(move.x) < 0.1) move.x = 0;
-                if (Math.abs(move.y) < 0.1) move.y = 0;
+                // ✅ 更大的死区：防漂移
+                const dead = 0.20;
 
-                move.x = clamp(move.x, -1, 1);
-                move.y = clamp(move.y, -1, 1);
+                // ✅ “特别慢”：把幅度整体缩小（核心）
+                // 原来你是 *2.0，这里我们再 *0.25（约等于 1/4）
+                const slowScale = 0.25;
+
+                let vx = Math.abs(rawX) < dead ? 0 : clamp(rawX, -1, 1) * slowScale;
+                let vy = Math.abs(rawY) < dead ? 0 : clamp(rawY, -1, 1) * slowScale;
+
+                // ✅ 再做平滑：更丝滑更慢（t 越小越慢）
+                const sm = smoothMoveRef.current;
+                sm.x = lerp(sm.x, vx, 0.15);
+                sm.y = lerp(sm.y, vy, 0.15);
+
+                move.x = sm.x;
+                move.y = sm.y;
               }
             } else {
               currentStatus = "✋ Hand Detected";
+              smoothMoveRef.current.x = 0;
+              smoothMoveRef.current.y = 0;
             }
+          } else {
+            smoothMoveRef.current.x = 0;
+            smoothMoveRef.current.y = 0;
           }
 
           updateDebugStatus(currentStatus);
-
-          onGestureChange?.({
-            isFist,
-            isWaving,
-            isPointing,
-            handPresent,
-            move,
-          });
+          onGestureChange?.({ isFist, isWaving, isPointing, handPresent, move });
         } catch (e) {
-          // 这里保持你原来做法：静默吞掉偶发推理异常
+          // 静默吞掉偶发错误
         }
       }
 
       rafRef.current = requestAnimationFrame(predictWebcam);
     };
 
-    // 只要二者都 ready，开始推理
-    // 注意：permissionGranted/loading 是 state，会触发 effect 重新跑，所以这里我们只在 effect 内启动一次循环，
-    // 循环内部会检查 recognizer/video 是否 ready。
     rafRef.current = requestAnimationFrame(predictWebcam);
 
     return () => {
       isActiveRef.current = false;
-
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
 
       if (streamRef.current) {
         for (const t of streamRef.current.getTracks()) t.stop();
         streamRef.current = null;
       }
-
       if (videoRef.current) {
         videoRef.current.srcObject = null;
       }
     };
   }, [onGestureChange, updateDebugStatus]);
 
-  // HUD 颜色逻辑（完全按你原来的 includes 判断）
   const hudClass =
     debugStatus.includes("MOVING")
       ? "bg-blue-500 text-white"
@@ -210,10 +222,13 @@ export function GestureController({ onGestureChange }) {
       ? "bg-red-500 text-white"
       : "bg-black/50 text-gray-300";
 
-  // UI：右上角小窗 + 叠加HUD
+  // ✅ fixed：永远右上角，不会滚丢
   return React.createElement(
     "div",
-    { className: "absolute top-4 right-4 w-52 h-40 bg-slate-900 rounded-lg border-4 border-slate-700 shadow-xl overflow-hidden z-50" },
+    {
+      className:
+        "fixed top-4 right-4 w-52 h-40 bg-slate-900 rounded-lg border-4 border-slate-700 shadow-xl overflow-hidden z-[999]",
+    },
 
     React.createElement("video", {
       ref: videoRef,
@@ -244,11 +259,10 @@ export function GestureController({ onGestureChange }) {
         React.createElement(
           "div",
           { className: "bg-slate-800/80 p-1 rounded border border-white/10" },
-          "☝️ POINT",
+          "✌️ V",
           React.createElement("br"),
           "TO MOVE"
         ),
-
         React.createElement(
           "div",
           { className: "bg-slate-800/80 p-1 rounded border border-white/10" },
@@ -256,7 +270,6 @@ export function GestureController({ onGestureChange }) {
           React.createElement("br"),
           "TO FISH"
         ),
-
         React.createElement(
           "div",
           { className: "bg-slate-800/80 p-1 rounded border border-white/10" },
