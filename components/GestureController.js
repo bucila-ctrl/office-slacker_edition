@@ -149,7 +149,7 @@ export function GestureController({ onGestureChange }) {
 
               // ✅ 速度特别慢：让 GameWorld 的 dx/dy 变成很小的值
               // 你 GameWorld 里是 dx * PLAYER_SPEED，所以这里直接给 0.25 当“慢速步伐”
-              const step = 0.25;
+              const step = 0.55;
 
               if (n === 1) {
                 isPointing = true;
